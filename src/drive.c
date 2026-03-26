@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * Drive access function calls
- * Copyright © 2011-2025 Pete Batard <pete@akeo.ie>
+ * Copyright © 2011-2026 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -65,6 +65,10 @@ const IID IID_IVdsDisk = { 0x07e5c822, 0xf00c, 0x47a1, { 0x8f, 0xce, 0xb2, 0x44,
 const IID IID_IVdsAdvancedDisk = { 0x6e6f6b40, 0x977c, 0x4069, { 0xbd, 0xdd, 0xac, 0x71, 0x00, 0x59, 0xf8, 0xc0 } };
 const IID IID_IVdsVolume = { 0x88306BB2, 0xE71F, 0x478C, { 0x86, 0xA2, 0x79, 0xDA, 0x20, 0x0A, 0x0F, 0x11} };
 const IID IID_IVdsVolumeMF3 = { 0x6788FAF9, 0x214E, 0x4B85, { 0xBA, 0x59, 0x26, 0x69, 0x53, 0x61, 0x6E, 0x09 } };
+#endif
+
+#ifndef PERSISTENT_VOLUME_STATE_DEV_VOLUME
+#define PERSISTENT_VOLUME_STATE_DEV_VOLUME (0x00002000)
 #endif
 
 /*
@@ -1207,6 +1211,21 @@ UINT GetDriveTypeFromIndex(DWORD DriveIndex)
 	return drive_type;
 }
 
+BOOL IsSourceImageLocatedOnTargetDrive(DWORD DriveIndex)
+{
+	size_t i;
+	char drive_letters[27] = { 0 };
+
+	if (boot_type != BT_IMAGE || !GetDriveLetters(DriveIndex, drive_letters) || drive_letters[0] == 0)
+		return FALSE;
+
+	for (i = 0; i < strlen(drive_letters); i++)
+		if ((PathGetDriveNumberU(image_path) + 'A') == drive_letters[i])
+			return TRUE;
+
+	return FALSE;
+}
+
 // Removes all drive letters associated with the specific drive, and return
 // either the first or last letter that was removed, according to bReturnLast.
 char RemoveDriveLetters(DWORD DriveIndex, BOOL bReturnLast, BOOL bSilent)
@@ -1542,7 +1561,7 @@ static BOOL StoreEspInfo(GUID* guid)
 	return WriteSettingStr(key_name[1], GuidToString(guid, TRUE));
 }
 
-static GUID* GetEspGuid(uint8_t index)
+static GUID GetEspGuid(uint8_t index)
 {
 	char key_name[16];
 
@@ -1570,7 +1589,7 @@ BOOL ToggleEsp(DWORD DriveIndex, uint64_t PartitionOffset)
 	HANDLE hPhysical;
 	DWORD dl_size, size, offset;
 	BYTE layout[4096] = { 0 }, buf[512];
-	GUID *guid = NULL, *stored_guid = NULL, mbr_guid;
+	GUID *guid = NULL, stored_guid = { 0 }, mbr_guid;
 	PDRIVE_LAYOUT_INFORMATION_EX DriveLayout = (PDRIVE_LAYOUT_INFORMATION_EX)(void*)layout;
 	typedef struct {
 		const uint8_t mbr_type;
@@ -1646,7 +1665,7 @@ BOOL ToggleEsp(DWORD DriveIndex, uint64_t PartitionOffset)
 			// Basic Data -> ESP
 			for (i = 1; i <= MAX_ESP_TOGGLE && esp_index < 0; i++) {
 				stored_guid = GetEspGuid((uint8_t)i);
-				if (stored_guid != NULL) {
+				if (!CompareGUID(&stored_guid, &GUID_NULL)) {
 					for (j = 0; j < (int)DriveLayout->PartitionCount && esp_index < 0; j++) {
 						if (DriveLayout->PartitionStyle == PARTITION_STYLE_GPT) {
 							guid = &DriveLayout->PartitionEntry[j].Gpt.PartitionId;
@@ -1656,7 +1675,7 @@ BOOL ToggleEsp(DWORD DriveIndex, uint64_t PartitionOffset)
 							*((uint64_t*)&mbr_guid.Data4) = DriveLayout->PartitionEntry[j].StartingOffset.QuadPart;
 							guid = &mbr_guid;
 						}
-						if (CompareGUID(stored_guid, guid)) {
+						if (CompareGUID(&stored_guid, guid)) {
 							esp_index = j;
 							delete_data = TRUE;
 							if (DriveLayout->PartitionStyle == PARTITION_STYLE_GPT)
@@ -1940,7 +1959,7 @@ BOOL GetDrivePartitionData(DWORD DriveIndex, char* FileSystemName, DWORD FileSys
 					if (buf != NULL) {
 						if (SetFilePointerEx(hPhysical, DriveLayout->PartitionEntry[i].StartingOffset, NULL, FILE_BEGIN) &&
 							ReadFile(hPhysical, buf, SelectedDrive.SectorSize, &size, NULL)) {
-							isUefiNtfs = (strncmp(&buf[0x2B], "UEFI_NTFS", 9) == 0);
+							isUefiNtfs = (strncmp(&buf[0x2B], "UEFI_NTFS", 9) == 0) || (strncmp(&buf[0x2B], "RUFUS_BOOT", 10) == 0);
 						}
 						free(buf);
 					}
@@ -2602,46 +2621,35 @@ const char* GetMBRPartitionType(const uint8_t type)
 
 const char* GetGPTPartitionType(const GUID* guid)
 {
-	int i;
-	for (i = 0; (i < ARRAYSIZE(gpt_type)) && !CompareGUID(guid, gpt_type[i].guid); i++);
-	return (i < ARRAYSIZE(gpt_type)) ? gpt_type[i].name : GuidToString(guid, TRUE);
+	const char* desc = gpt_type_desc(guid);
+	return desc != NULL ? desc : GuidToString(guid, TRUE);
 }
 
 /*
- * Detect Microsoft Dev Drives, which are VHDs consisting of a small MSR followed by a large
- * (50 GB or more) ReFS partition. See https://learn.microsoft.com/en-us/windows/dev-drive/.
- * NB: Despite the option being proposed, I have *NOT* been able to create MBR-based Dev Drives.
+ * Detect Microsoft Dev Drives. See https://learn.microsoft.com/en-us/windows/dev-drive/.
  */
 BOOL IsMsDevDrive(DWORD DriveIndex)
 {
-	BOOL r, ret = FALSE;
+	BOOL ret = FALSE;
 	DWORD size = 0;
-	HANDLE hPhysical = INVALID_HANDLE_VALUE;
-	BYTE layout[4096] = { 0 };
-	PDRIVE_LAYOUT_INFORMATION_EX DriveLayout = (PDRIVE_LAYOUT_INFORMATION_EX)(void*)layout;
+	HANDLE hLogical = INVALID_HANDLE_VALUE;
+	FILE_FS_PERSISTENT_VOLUME_INFORMATION data = { 0 };
 
-	hPhysical = GetPhysicalHandle(DriveIndex, FALSE, FALSE, TRUE);
-	if (hPhysical == INVALID_HANDLE_VALUE)
-		goto out;
-
-	r = DeviceIoControl(hPhysical, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, NULL, 0, layout, sizeof(layout), &size, NULL);
-	if (!r || size <= 0)
+	hLogical = GetLogicalHandle(DriveIndex, 0, FALSE, FALSE, FALSE);
+	if (hLogical == INVALID_HANDLE_VALUE)
 		goto out;
 
-	if (DriveLayout->PartitionStyle != PARTITION_STYLE_GPT)
+	data.FlagMask = PERSISTENT_VOLUME_STATE_DEV_VOLUME;
+	data.Version = 1;
+
+	if (!DeviceIoControl(hLogical, FSCTL_QUERY_PERSISTENT_VOLUME_STATE, &data, sizeof(data),
+		&data, sizeof(data), &size, NULL))
 		goto out;
-	if (DriveLayout->PartitionCount != 2)
-		goto out;
-	if (!CompareGUID(&DriveLayout->PartitionEntry[0].Gpt.PartitionType, &PARTITION_MICROSOFT_RESERVED))
-		goto out;
-	if (!CompareGUID(&DriveLayout->PartitionEntry[1].Gpt.PartitionType, &PARTITION_MICROSOFT_DATA))
-		goto out;
-	if (DriveLayout->PartitionEntry[1].PartitionLength.QuadPart < 20 * GB)
-		goto out;
-	ret = (strcmp(GetFsName(hPhysical, DriveLayout->PartitionEntry[1].StartingOffset), "ReFS") == 0);
+
+	ret = data.VolumeFlags & PERSISTENT_VOLUME_STATE_DEV_VOLUME;
 
 out:
-	safe_closehandle(hPhysical);
+	safe_closehandle(hLogical);
 	return ret;
 }
 
@@ -2659,7 +2667,7 @@ BOOL IsFilteredDrive(DWORD DriveIndex)
 	HANDLE hPhysical = INVALID_HANDLE_VALUE;
 	BYTE layout[4096] = { 0 };
 	PDRIVE_LAYOUT_INFORMATION_EX DriveLayout = (PDRIVE_LAYOUT_INFORMATION_EX)(void*)layout;
-	GUID* DiskGuid;
+	GUID DiskGuid;
 
 	hPhysical = GetPhysicalHandle(DriveIndex, FALSE, FALSE, TRUE);
 	if (hPhysical == INVALID_HANDLE_VALUE)
@@ -2675,8 +2683,8 @@ BOOL IsFilteredDrive(DWORD DriveIndex)
 	for (i = 1; i <= MAX_IGNORE_USB; i++) {
 		static_sprintf(setting_name, "IgnoreDisk%02d", i);
 		DiskGuid = StringToGuid(ReadSettingStr(setting_name));
-		if (CompareGUID(&DriveLayout->Gpt.DiskId, DiskGuid)) {
-			uprintf("Device eliminated because it matches Disk GUID %s", GuidToString(DiskGuid, TRUE));
+		if (CompareGUID(&DriveLayout->Gpt.DiskId, &DiskGuid)) {
+			uprintf("Device eliminated because it matches Disk GUID %s", GuidToString(&DiskGuid, TRUE));
 			ret = TRUE;
 			goto out;
 		}

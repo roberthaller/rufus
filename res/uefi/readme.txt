@@ -13,11 +13,11 @@ o Secure Boot signed NTFS UEFI drivers, derived from ntfs-3g [1].
   ARM driver (ntfs_arm.efi) is not Secure Boot signed.
 
 o Non Secure Boot signed exFAT UEFI drivers from EfiFs [2].
-  These drivers are the exact same as the binaries from EfiFs release 1.9 but,
+  These drivers are the exact same as the binaries from EfiFs release 1.11 but,
   because they are licensed under GPLv3, cannot be Secure Boot signed.
 
 o Secure Boot signed UEFI:NTFS bootloader binaries [3].
-  These drivers are the exact same as the binaries from release 2.3, except for
+  These drivers are the exact same as the binaries from release 2.6, except for
   the addition of Microsoft's Secure Boot signature.
   Note that, per Microsoft's current Secure Boot signing policies, the 32-bit
   ARM bootloader (bootarm.efi) is not Secure Boot signed.
@@ -25,10 +25,12 @@ o Secure Boot signed UEFI:NTFS bootloader binaries [3].
 The above means that, if booting an NTFS partition on an x86_32, x86_64 or ARM64
 system, Secure Boot does not need to be disabled.
 
-The FAT partition was created on Debian GNU/Linux using the following commands
+The FAT partition was created on Debian GNU/Linux using the following commands:
   dd if=/dev/zero of=uefi-ntfs.img bs=512 count=2048
-  mkfs.vfat -n UEFI_NTFS uefi-ntfs.img
-and then mounting the uefi-ntfs.img image and copying the relevant files.
+  chown 1000:100 uefi-ntfs.img
+  mkfs.vfat -n RUFUS_BOOT uefi-ntfs.img
+  mount -t vfat uefi-ntfs.img /mnt/hd -o rw,uid=1000,gid=100
+and then copying the relevant files.
 
 [1] https://github.com/pbatard/ntfs-3g
 [2] https://github.com/pbatard/efifs
